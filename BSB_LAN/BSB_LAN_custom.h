@@ -4,7 +4,13 @@
  * This short example prints a "Ping!" message every 60 seconds.
 */
 
-
+// Store a value for a local custom parameter (10100-10105) and publish it to MQTT.
+// query() serves the stored value (also used by the web UI), so the MQTT message gets the proper name/unit.
+auto publishCustomParam = [](float line, const char *val) {
+  strncpy(customParamValues[(int)line - CUSTOM_PARAM_FIRST], val, sizeof(customParamValues[0]) - 1);
+  query(line);
+  LogToMQTT(line);
+};
 
 // Run loop logic every 1000ms (1 second)
 if (custom_timer > custom_timer_compare + 1000) {   
@@ -14,18 +20,17 @@ if (custom_timer > custom_timer_compare + 1000) {
   bool current_in1 = (digitalRead(PIN_INPUT_1) == HIGH);
   bool current_in2 = (digitalRead(PIN_INPUT_2) == HIGH);
   bool current_in3 = (digitalRead(PIN_INPUT_3) == HIGH);
-  bool relay = (digitalRead(PIN_RELAY));
 
- 
-  // Logging
+  // Loging
   // Serial.print("Relay: ");
   // Serial.println(digitalRead(PIN_RELAY));
   // Serial.print("Input1: ");
   // Serial.println(digitalRead(PIN_INPUT_1));
 
-  // If a physical input switch changes position to ON 
-  if (current_in1 != last_in1 || current_in2 != last_in2 || current_in3 != last_in3 || firstRunExecution ) {
-    
+  // If a physical input switch changes position
+  if (current_in1 != last_in1 || current_in2 != last_in2 || current_in3 != last_in3 || firstRunExecution) {
+    bool masterChanged = (current_in1 != last_in1) || firstRunExecution;
+
     // Print log
     Serial.print("Input1: ");
     Serial.println(current_in1);
@@ -39,54 +44,37 @@ if (custom_timer > custom_timer_compare + 1000) {
     last_in3 = current_in3;
     firstRunExecution = false;
 
-  // --- DIRECT MQTT PUSH FOR VIRTUAL INPUTS ---
-    if (MQTTPubSubClient && MQTTPubSubClient->connected()) { 
-      char topic[64];
-      
-      sprintf(topic, "%s/10101", MQTTTopicPrefix);
-      MQTTPubSubClient->publish(topic, current_in1 ? "1" : "0"); 
-      
-      sprintf(topic, "%s/10102", MQTTTopicPrefix);
-      MQTTPubSubClient->publish(topic, current_in2 ? "1" : "0"); 
-      
-      sprintf(topic, "%s/10103", MQTTTopicPrefix);
-      MQTTPubSubClient->publish(topic, current_in3 ? "1" : "0"); 
-    }
-
     // --- INSTANT MQTT PUSH FOR INPUTS ---
-    // This forces BSB-LAN to natively broadcast these values over MQTT automatically!
-    // set(10101, (char*)(current_in1 ? "1" : "0"), 1);
-    // set(10102, (char*)(current_in2 ? "1" : "0"), 1);
-    // set(10103, (char*)(current_in3 ? "1" : "0"), 1);
-    
-    if (current_in1 && (current_in2 || current_in3) ) {
-      // Transmit state data directly to the heating controller parameter 700 
-        uint32_t rc = set(700, (char*)"1", 1); // Comfort Mode
-        printFmtToDebug("Automation: Boiler set to Comfort Mode. Result: %lu\r\n", rc);
-        digitalWrite(PIN_RELAY, HIGH);
-    } 
-    else {
-      uint32_t rc = set(700, (char*)"0", 1); // Protection Mode
+    publishCustomParam(10101, current_in1 ? "1" : "0");
+    publishCustomParam(10102, current_in2 ? "1" : "0");
+    publishCustomParam(10103, current_in3 ? "1" : "0");
+
+
+    // Commands are sent only on a switch change; in between, HA can override parameter 700.
+    //  - master changed: follow the master switch (ON -> Automatic, OFF -> Protection)
+    //  - floor changed:  only while master is ON: Automatic if any floor requests heat, else Protection
+    //                    (ignored while master is OFF)
+    bool targetHeatingState = masterChanged ? current_in1 : (current_in2 || current_in3);
+
+    // Transmit state data directly to the heating controller parameter 700
+    if (!masterChanged && !current_in1) {
+      printFmtToDebug("Automation: Floor switch changed while master is OFF - ignored.\r\n");
+    } else if (targetHeatingState) {
+      uint32_t rc = set(700, (char*)"1", 1); // 1 = Automatic
+      printFmtToDebug("Automation: Boiler set to Automatic Mode. Result: %lu\r\n", rc);
+      digitalWrite(PIN_RELAY, HIGH);
+    } else {
+      uint32_t rc = set(700, (char*)"0", 1); // 0 = Protection (Off, frost protection only)
       printFmtToDebug("Automation: Boiler set to Protection Mode. Result: %lu\r\n", rc);
       digitalWrite(PIN_RELAY, LOW);
     }
-}
+  }
 }
 
 // Run loop logic every 60000ms (60 second)
 if (custom_timer > custom_timer_compare60+60000) {    // every 60 seconds  
+  double timeElapsedSeconds = (custom_timer - custom_timer_compare60) / 1000.0;
   custom_timer_compare60 = millis();
-  
-
-  // just ping
-  printFmtToDebug("%lu Ping!\r\n", millis());
-
-}
-
-// 2. Pulse Counter Logging (Executes every 6 minutes)
-if (custom_timer > custom_timer_compare6+360000) { // every 6 minutes 
-  custom_timer_compare6 = millis();
-  double timeElapsedSeconds = (custom_timer - custom_timer_compare6) / 1000.0;
 
   // 1. Safely snapshot the volatile total pulse count
   noInterrupts();
@@ -99,8 +87,7 @@ if (custom_timer > custom_timer_compare6+360000) { // every 6 minutes
   char pulsesInWindowStrPayload[16];
   ultoa(pulsesInWindow, pulsesInWindowStrPayload, 10); // 10 means base-10 decimal format
 
-  // Push to parameter 10104 as text
-  // set(10104, pulsesInWindowStrPayload, 1);
+  publishCustomParam(10104, pulsesInWindowStrPayload);
 
   oldPulseCount = totalPulsesTracked;
 
@@ -108,7 +95,6 @@ if (custom_timer > custom_timer_compare6+360000) { // every 6 minutes
   if (pulsesInWindow > 0 && timeElapsedSeconds > 0) {
     // Math logic: (Pulses / Seconds) * (3600 / 1600)
     // Over an exact 60-second window, this breaks down to: Pulses * 0.0375
-    // Over an exact 6 minutes window (Pulses / 360) * (3600 / 1600) - Simplified, this means the multiplier changes from $0.0375$ to $0.00625$.
     currentLoadKW = (pulsesInWindow / timeElapsedSeconds) * (3600.0 / 1600.0);
     
   } else {
@@ -126,27 +112,33 @@ if (custom_timer > custom_timer_compare6+360000) { // every 6 minutes
   char pulsesStrPayload[16];
   ultoa(totalPulsesTracked, pulsesStrPayload, 10); // 10 means base-10 decimal format
 
-  // Push to parameter 10105 as int
-  // set(10105, pulsesStrPayload, 1);
+  publishCustomParam(10105, pulsesStrPayload);
 
   // 5. NATIVE MQTT PUSH
   // Convert our double variable into a text string with 4 decimal places
   char mqttStrPayload[16];
   dtostrf(currentLoadKW, 1, 4, mqttStrPayload);
+  publishCustomParam(10100, mqttStrPayload);
 
-  // Push to parameter 10100. BSB-LAN will automatically broadcast this via MQTT!
-  // set(10100, mqttStrPayload, 1);
-
-    if (MQTTPubSubClient && MQTTPubSubClient->connected()) { 
-      char topic[64];
-      
-      sprintf(topic, "%s/10100", MQTTTopicPrefix);
-      MQTTPubSubClient->publish(topic, mqttStrPayload); 
-      
-      sprintf(topic, "%s/10105", MQTTTopicPrefix);
-      MQTTPubSubClient->publish(topic, pulsesStrPayload); 
-    
-    }
+  // just ping
+  printFmtToDebug("%lu Ping!\r\n", millis());
 
 }
 
+// 2. Pulse Counter Logging (Executes every 6 Seconds)
+// if (custom_timer > custom_timer_compare6+6000) { // every 6 seconds 
+//   // lastPulsePrintTime = custom_timer; // Reset ONLY the pulse timer baseline
+//   custom_timer_compare6 = millis();
+
+
+// }
+
+
+// for future testing
+// Automation logic conditions
+  // if (input1 && (input2 || input3)) {
+  //   digitalWrite(PIN_RELAY, HIGH);
+  // }
+  // if (!input2 && !input3) {
+  //   digitalWrite(PIN_RELAY, LOW);
+  // }

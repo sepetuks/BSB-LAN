@@ -5,8 +5,8 @@ unsigned long custom_timer_compare60 = 0;
 
 // --- Custom Heating Control Pin Definitions ---
 #define PIN_INPUT_1  18  // D18: Master Input Switch
-#define PIN_INPUT_2  19  // D19: Input 2
-#define PIN_INPUT_3  21  // D21: Input 3
+#define PIN_INPUT_2  19  // D19: Ist floor input switch
+#define PIN_INPUT_3  21  // D21: IInd floor input switch
 #define PIN_RELAY     4  // D4: Relay Control Output
 
 // --- Custom Pulse Counter Definitions ---
@@ -34,39 +34,15 @@ void IRAM_ATTR handlePulse() {
 // Keeps track of the last state globally to avoid flooding the BSB bus
 static bool lastSystemState = false;
 
-// // MQTT prefix
-// #define CUSTOM_MQTT_PREFIX  "BSB-LAN/custom"
-
 // History tracking for inputs only
 static bool last_in1 = false;
 static bool last_in2 = false;
 static bool last_in3 = false;
 static bool firstRunExecution = true;
 
-// bool custom_get_cmd(uint16_t cmd, int32_t &result) {
-
-//   if (cmd == 10101) {
-//     result = current_in1 ? 1 : 0;
-//     return true;
-//   }
-//   if (cmd == 10102) {
-//     result = current_in2 ? 1 : 0;
-//     return true;
-//   }
-//   if (cmd == 10103) {
-//     result = current_in3 ? 1 : 0;
-//     return true;
-//   }
-  // if (cmd == 10104) {
-  //   result = pulses60;
-  //   return true;
-  // }
-  // if (cmd == 10105) {
-  //   result = totalPulses;
-  //   return true;
-  // }
-  // if (cmd == 10100) {
-  //   result = currentLoadKW;
-  //   return true;
-  // }
-// }
+// --- Local custom parameters 10100-10105 ---
+// Values are produced by BSB_LAN_custom.h and served by query() from here instead of the heater bus,
+// so they show up in the web UI and are published to MQTT with their proper name/unit.
+#define CUSTOM_PARAM_FIRST 10100
+#define CUSTOM_PARAM_COUNT 6
+char customParamValues[CUSTOM_PARAM_COUNT][16] = { "0", "0", "0", "0", "0", "0" };

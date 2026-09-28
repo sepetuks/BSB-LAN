@@ -1,8 +1,8 @@
 // --- CUSTOM PARAMETER TEXT LABELS ---
 #define S10100_0_TEXT "Power Meter Katiline Load"
-#define S10101_0_TEXT "Boiler Input Switch 1"
-#define S10102_0_TEXT "Boiler Input Switch 2"
-#define S10103_0_TEXT "Boiler Input Switch 3"
+#define S10101_0_TEXT "Main switch"
+#define S10102_0_TEXT "Ist floor"
+#define S10103_0_TEXT "IInd floor"
 #define S10104_0_TEXT "Pulses within 60s"
 #define S10105_0_TEXT "Total pulses"
 
@@ -10267,6 +10267,12 @@ const cmd_t cmdtbl[]={
 {0x0D3D08EB,  VT_TEMP,            10049, S10049_0, 0,                  NULL,         DEFAULT_FLAG, 172, 109}, // Boiler temperature setpoint in manual operation
 {0x053D3022,  VT_PERCENT_NN,      10050, S10050_0, 0,                  NULL,         DEFAULT_FLAG, 172, 109}, // Controller stop setpoint
 {0x053D157C,  VT_YESNO,           10051, S10051_0, sizeof(ENUM_YESNO), ENUM_YESNO,   DEFAULT_FLAG, 172, 109}, // User Reset
+{0x053D0000,  VT_POWER,       10100, S10100_0,   0,                    NULL,         FL_RONLY, 255, 255}, // Power Meter Katiline Load
+{0x053D0000,  VT_ONOFF,       10101, S10101_0,   sizeof(ENUM_ONOFF),   ENUM_ONOFF,   FL_RONLY, 255, 255}, // Main Switch
+{0x053D0000,  VT_ONOFF,       10102, S10102_0,   sizeof(ENUM_ONOFF),   ENUM_ONOFF,   FL_RONLY, 255, 255}, // Ist Floor
+{0x053D0000,  VT_ONOFF,       10103, S10103_0,   sizeof(ENUM_ONOFF),   ENUM_ONOFF,   FL_RONLY, 255, 255}, // IInd floor
+{0x053D0000,  VT_UINT,        10104, S10104_0,   0,                    NULL,         FL_RONLY, 255, 255}, // Pulses within 60s
+{0x053D0000,  VT_DWORD,       10105, S10105_0,   0,                    NULL,         FL_RONLY, 255, 255}, // Total pulses
 {0x2D00020F,  VT_CUSTOM_ENUM,     10110, S_BATHK1, sizeof(E_BAT_WH),   E_BAT_WH,     FL_RONLY, 49, 255},
 {0x2D00020F,  VT_CUSTOM_ENUM,     10110, S_BATHK1, sizeof(E_BAT_WH),   E_BAT_WH,     FL_RONLY, 50, 255},
 {0x2D00020F,  VT_CUSTOM_ENUM,     10110, S_BATHK1, sizeof(E_BAT_WH),   E_BAT_WH,     FL_RONLY, 51, 255},

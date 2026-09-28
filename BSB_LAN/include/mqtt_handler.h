@@ -55,8 +55,16 @@ void mqtt_sendtoBroker(parameter param) {
   initStringBuffer(&sb_payload, MQTTPayload, sizeof(MQTTPayload));
   initStringBuffer(&sb_topic, MQTTTopic, sizeof(MQTTTopic));
   appendStringBuffer(&sb_topic, "%s/%d/%d/%g/status", MQTTTopicPrefix, (param.dest_addr==-1?bus->getBusDest():param.dest_addr), decodedTelegram.cat, param.number);
+  // Only publish parameters that carry a real value
   if (decodedTelegram.error != 0) {
-    strcpy(decodedTelegram.value, replaceDisabled);
+    printFmtToDebug("MQTT publish skipped for %g: error %d\r\n", param.number, decodedTelegram.error);
+    return;
+  }
+  if (decodedTelegram.value[0] == '\0'
+      || !strncmp(decodedTelegram.value, "---", 3)
+      || (decodedTelegram.data_type == DT_VALS && !strcmp(decodedTelegram.value, replaceDisabled))) {
+    printFmtToDebug("MQTT publish skipped for %g: no value\r\n", param.number);
+    return;
   }
   switch(mqtt_mode)
   {
@@ -121,13 +129,6 @@ void mqtt_sendtoBroker(parameter param) {
       return;
   }
 
-/*
-  // debugging..
-  if (mqtt_mode != 3 && decodedTelegram.error != 0) {
-    printFmtToDebug("MQTT Publish skipped for param %g due to query error %d\r\n", param.number, decodedTelegram.prognrdescaddr, decodedTelegram.value, decodedTelegram.unit_mqtt, decodedTelegram.error);
-    return;
-  }
-*/
   printFmtToDebug("Publishing to topic: %s\r\n", MQTTTopic);
   // Now publish the json payload only once
   if (MQTTPubSubClient != nullptr) {
@@ -141,6 +142,103 @@ void mqtt_sendtoBroker(parameter param) {
   } else {
     printlnToDebug("MQTT broker could not be reached, aborting...")
   }
+}
+
+/* Function: mqtt_publish_gpio()
+ * Does:     Publishes the state of a GPIO pin (0/1, retained) to <MQTTTopicPrefix>/gpio/<pin>/status
+ */
+#if defined(MQTT_GPIO_PINS)
+static const uint8_t mqtt_gpio_pins[] = {MQTT_GPIO_PINS};
+static uint8_t mqtt_gpio_last_state[sizeof(mqtt_gpio_pins)];
+#if !defined(MQTT_GPIO_PIN_MODE)
+#define MQTT_GPIO_PIN_MODE INPUT    // or INPUT_PULLUP / INPUT_PULLDOWN, can be set in BSB_LAN_config.h
+#endif
+
+// Configure GPIOs defined in MQTT_GPIO_PINS once after boot. An MQTT/web "set" later turns a pin into an output.
+void mqtt_gpio_init() {
+  static bool initialized = false;
+  if (initialized) return;
+  for (uint8_t i = 0; i < sizeof(mqtt_gpio_pins); i++) {
+    pinMode(mqtt_gpio_pins[i], MQTT_GPIO_PIN_MODE);
+    mqtt_gpio_last_state[i] = (digitalRead(mqtt_gpio_pins[i]) != LOW);
+  }
+  initialized = true;
+}
+#endif
+
+void mqtt_publish_gpio(uint8_t pin, uint8_t val) {
+#if defined(MQTT_GPIO_PINS)
+  for (uint8_t i = 0; i < sizeof(mqtt_gpio_pins); i++) {
+    if (mqtt_gpio_pins[i] == pin) mqtt_gpio_last_state[i] = (val != LOW);   // keep change detection in sync
+  }
+#endif
+  char topic[sizeof(MQTTTopicPrefix) + 20];
+  snprintf(topic, sizeof(topic), "%s/gpio/%d/status", MQTTTopicPrefix, pin);
+  if (MQTTPubSubClient != nullptr && MQTTPubSubClient->connected()) {
+    MQTTPubSubClient->publish(topic, val != LOW ? "1" : "0", 1, true);
+    printFmtToDebug("Published GPIO%d state %d to topic '%s'\r\n", pin, val != LOW ? 1 : 0, topic);
+  }
+}
+
+/* Function: mqtt_send_gpio_discovery()
+ * Does:     Announces (or removes) the GPIO pins defined in MQTT_GPIO_PINS as switches via MQTT auto-discovery
+ *           and publishes their current state.
+ */
+bool mqtt_send_gpio_discovery(bool create=true) {
+#if defined(MQTT_GPIO_PINS)
+  const uint8_t* gpio_pins = mqtt_gpio_pins;
+  mqtt_gpio_init();
+  char MQTTPayload[512] = "";
+  char MQTTTopic[80] = "";
+  if (MQTTPubSubClient == nullptr || !MQTTPubSubClient->connected()) {
+    printlnToDebug("No connection to MQTT broker, aborting...");
+    return false;
+  }
+  for (uint8_t i = 0; i < sizeof(mqtt_gpio_pins); i++) {
+    uint8_t pin = gpio_pins[i];
+    snprintf(MQTTTopic, sizeof(MQTTTopic), "homeassistant/switch/BSB-LAN/%s-gpio-%d/config", MQTTTopicPrefix, pin);
+    replace_char(MQTTTopic, '.', '-');
+    if (create) {
+      snprintf(MQTTPayload, sizeof(MQTTPayload), "{\"~\":\"%s/gpio/%d\",\"unique_id\":\"%s-%02X%02X%02X%02X%02X%02X-gpio-%d\",\"state_topic\":\"~/status\",\"command_topic\":\"~/set\",\"payload_on\":\"1\",\"payload_off\":\"0\",\"icon\":\"mdi:toggle-switch\",\"name\":\"GPIO %d\",\"device\":{\"name\":\"%s\",\"identifiers\":\"%s-%02X%02X%02X%02X%02X%02X\",\"manufacturer\":\"bsb-lan.de\",\"model\":\"" MAJOR "." MINOR "." PATCH "\"}}",
+        MQTTTopicPrefix, pin, MQTTTopicPrefix, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], pin, pin, MQTTTopicPrefix, MQTTTopicPrefix, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+      MQTTPayload[0] = '\0';      // empty message removes the entry
+    }
+    MQTTPubSubClient->publish(MQTTTopic, MQTTPayload, 1, true);
+    if (create) {
+      mqtt_publish_gpio(pin, digitalRead(pin));
+    }
+  }
+#else
+  (void)create;
+#endif
+  return true;
+}
+
+/* Function: mqtt_check_gpio_changes()
+ * Does:     Reads the GPIO pins defined in MQTT_GPIO_PINS and publishes their state when it changes
+ *           (e.g. an input driven by an external signal). A change must be stable for 50 ms (debounce).
+ */
+void mqtt_check_gpio_changes() {
+#if defined(MQTT_GPIO_PINS)
+  static unsigned long last_check = 0;
+  static unsigned long change_since[sizeof(mqtt_gpio_pins)] = {0};
+  mqtt_gpio_init();
+  if (millis() - last_check < 10) return;
+  last_check = millis();
+  if (MQTTPubSubClient == nullptr || !MQTTPubSubClient->connected()) return;
+  for (uint8_t i = 0; i < sizeof(mqtt_gpio_pins); i++) {
+    uint8_t val = (digitalRead(mqtt_gpio_pins[i]) != LOW);
+    if (val == mqtt_gpio_last_state[i]) {
+      change_since[i] = 0;
+    } else if (change_since[i] == 0) {
+      change_since[i] = millis() | 1;   // start debounce timer (never 0)
+    } else if (millis() - change_since[i] >= 50) {
+      change_since[i] = 0;
+      mqtt_publish_gpio(mqtt_gpio_pins[i], val);
+    }
+  }
+#endif
 }
 
 void LogToMQTT (float line) {
@@ -194,10 +292,10 @@ bool mqtt_send_discovery(bool create=true) {
     if (bus->getBusType() != BUS_PPS && line >= 15000 && line <= 16000) continue;
     if (line == 19999) continue;    // skip entry for unknown parameter
     if (line > 20999) break;
-    if (LoggingMode & CF_LOGMODE_MQTT_ONLY_LOG_PARAMS) {
+    if (create && (LoggingMode & CF_LOGMODE_MQTT_ONLY_LOG_PARAMS)) {   // when removing, remove all entries
       boolean isLogged = false;
       for (int i=0;i<numLogValues;i++) {
-        if (log_parameters[i].number == line && (log_parameters[i].dest_addr == bus->getBusDest() || (log_parameters[i].dest_addr == -1 && bus->getBusDest() ==  dest_address))) {
+        if (log_parameters[i].number > 0 && log_parameters[i].number == line && (log_parameters[i].dest_addr == bus->getBusDest() || (log_parameters[i].dest_addr == -1 && bus->getBusDest() ==  dest_address))) {
           isLogged = true;
         }
       }
@@ -459,6 +557,7 @@ bool mqtt_connect() {
       MQTTPubSubClient->setCallback(mqtt_callback);  //Luposoft: set to function is called when incoming message
       MQTTPubSubClient->publish(mqtt_get_will_topic(), "online", 1, true);
       printFmtToDebug("Published status 'online' to topic '%s'\r\n", mqtt_get_will_topic());
+      mqtt_send_gpio_discovery(true);   // few messages only, so always (re)announce GPIOs and publish their current state
 
       if (!brokerHadSession) {  // broker lost session state (restart w/o persistence, expiry, cleared state…)
         printlnToDebug("MQTT broker lost session state, re-publishing known devices and parameters...");
@@ -573,6 +672,34 @@ void mqtt_callback(char* topic, byte* passed_payload, unsigned int length) {
   if (!strncmp(topic, MQTTTopicPrefix, prefixLen)) {
     const char* rest = topic + prefixLen;
     if (!strncmp(rest, "/meta/", 6)) return;
+  }
+  // GPIO topic: BSB-LAN/gpio/<pin>/set|poll, state is published to BSB-LAN/gpio/<pin>/status
+  if (!strncmp(p, "/gpio/", 6)) {
+    int pin = -1;
+    if (sscanf(p, "/gpio/%d/%9s", &pin, parsed_command) != 2 || pin < 0 || pin > 255) {
+      printFmtToDebug("Invalid MQTT GPIO topic: %s\r\n", topic);
+      return;
+    }
+    if (!strcmp(parsed_command, "status")) return;   // silently discard our own status messages
+    printFmtToDebug("MQTT message received [%s | %s]\r\n", topic, payload);
+    uint8_t val;
+    if (!strcmp(parsed_command, "set")) {
+      for (char* c = payload; *c; c++) *c |= 0x20;  // to lower case
+      if (!strncmp(payload, "on", 2) || !strncmp(payload, "high", 4) || payload[0] == '1') {
+        val = HIGH;
+      } else {
+        val = LOW;
+      }
+      pinMode(pin, OUTPUT);
+      digitalWrite(pin, val);
+    } else if (!strcmp(parsed_command, "poll")) {
+      val = digitalRead(pin);
+    } else {
+      printFmtToDebug("Unknown command at the end of MQTT GPIO topic: %s\r\n", parsed_command);
+      return;
+    }
+    mqtt_publish_gpio(pin, val);
+    return;
   }
   if (sscanf(topic+topic_len, "/%d/%d/%g/%9s", &parsed_device, &parsed_category, &parsed_parameter, parsed_command) == 4) {
     param.dest_addr = parsed_device;

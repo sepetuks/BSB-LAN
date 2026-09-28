@@ -301,13 +301,24 @@ class Eth : public ETHClass {
 public:
     int maintain(void) const { return 0;} ; // handled internally
     bool begin(uint8_t *mac, IPAddress ip, IPAddress dnsserver, IPAddress gateway, IPAddress subnet) {
+      _static_ip = ip; _static_gw = gateway; _static_sn = subnet; _static_dns = dnsserver;
+      _use_static = true;
       bool success = begin(mac);
       config(ip, gateway, subnet, dnsserver, dnsserver); //Static
       return success;
     }
+    // ETHClass::begin() starts the DHCP client, so depending on PHY link timing (e.g. after flashing) DHCP may win over the static config. Re-apply it on link up.
+    void reapplyStaticConfig() {
+      if (_use_static) {
+        config(_static_ip, _static_gw, _static_sn, _static_dns, _static_dns);
+      }
+    }
     bool begin(uint8_t *mac) {
       return ETHClass::begin();
     }
+private:
+    bool _use_static = false;
+    IPAddress _static_ip, _static_gw, _static_sn, _static_dns;
 };
 
 Eth Ethernet;
@@ -465,6 +476,8 @@ unsigned long lastLogTime = millis();
 unsigned long lastMQTTTime = millis();
 unsigned long custom_timer = millis();
 unsigned long custom_timer_compare = 0;
+
+
 float custom_floats[20] = { 0 };
 long custom_longs[20] = { 0 };
 
@@ -3876,6 +3889,19 @@ void query(float line) {  // line (ProgNr)
     }
   if (i>=0) {
     loadPrognrElementsFromTable(line, i);
+    // Local custom parameters (see BSB_LAN_custom_global.h): serve stored value, never query the bus
+    if (line >= CUSTOM_PARAM_FIRST && line < CUSTOM_PARAM_FIRST + CUSTOM_PARAM_COUNT) {
+      const char *custom_val = customParamValues[(int)line - CUSTOM_PARAM_FIRST];
+      loadCategoryDescAddr();   // fills catdescaddr; leaving it NULL crashes the web UI / debug output (strcpy on NULL)
+      decodedTelegram.msg_type = TYPE_ANS;
+      decodedTelegram.prognr = line;
+      if (decodedTelegram.data_type == DT_ENUM) {
+        printENUM(decodedTelegram.enumstr, decodedTelegram.enumstr_len, atoi(custom_val), 0);
+      } else {
+        strcpy(decodedTelegram.value, custom_val);
+      }
+      return;
+    }
     if (decodedTelegram.readwrite == FL_WONLY) { //"write only"
       printFmtToDebug("%g ", line);
       loadCategoryDescAddr();
@@ -4937,6 +4963,9 @@ void loop() {
           mqtt_connect();
           if (change_dest_success == true) {
             mqtt_success = mqtt_send_discovery(create);
+          }
+          if (tempDestAddr == destAddr) {   // GPIOs belong to BSB-LAN itself, not to a bus device
+            mqtt_send_gpio_discovery(create);
           }
           if (tempDestAddr != destAddr) {
             return_to_default_destination(destAddr);
@@ -6724,6 +6753,9 @@ next_parameter:
               digitalWrite(pin, val);
             }
             printFmtToWebClient("GPIO%hu: %d", pin, val!=LOW?1:0);
+            if (mqtt_broker_addr[0]) {
+              mqtt_publish_gpio(pin, val);
+            }
           } else if (range[0]=='B') {
             if (range[1]=='0') { // reset furnace duration
               printToWebClient(STR20006);
@@ -6840,6 +6872,7 @@ next_parameter:
 
       mqtt_connect();        //Luposoft, connect to mqtt
       MQTTPubSubClient->loop();    //Luposoft: listen to incoming messages
+      mqtt_check_gpio_changes();   // publish state changes of GPIOs defined in MQTT_GPIO_PINS
 
       if ((((millis() - lastMQTTTime >= (log_interval * 1000)) && log_interval > 0) || log_now > 0) && numLogValues > 0) {
         lastMQTTTime = millis();
@@ -7354,10 +7387,9 @@ void scanAndConnectToStrongestNetwork() {
 
   if (i_strongest < 0) {
     printFmtToDebug("No network with SSID %s found!\r\n", wifi_ssid);
-  } else {
-    printFmtToDebug("SSID match found at %d. Connecting...\r\n", i_strongest);
-    WiFi.begin(wifi_ssid, wifi_pass, 0, WiFi.BSSID(i_strongest));
   }
+  printFmtToDebug("SSID match found at %d. Connecting...\r\n", i_strongest);
+  WiFi.begin(wifi_ssid, wifi_pass, 0, WiFi.BSSID(i_strongest));
 }
 
 void printWifiStatus()
@@ -7398,6 +7430,7 @@ void netEvent(WiFiEvent_t event) {
       break;
     case ARDUINO_EVENT_ETH_CONNECTED:
       SerialOutput->println("Ethernet connected.");
+      Ethernet.reapplyStaticConfig();
       if (localAP == true) {
         removeTemporaryAP();
       }
